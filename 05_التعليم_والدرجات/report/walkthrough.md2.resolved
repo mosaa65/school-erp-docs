@@ -1,0 +1,75 @@
+# ملخص التنفيذ — إعادة هيكلة نظام الاختبارات v4.0
+
+## ما تم تنفيذه
+
+### System 08 — نظام جدولة الاختبارات وتوزيع اللجان (ETDS v2.0)
+
+| الملف | التغيير |
+|-------|---------|
+| [DDL_SCHEDULING.sql](file:///c:/Users/mousa/Desktop/system/school_system-erp/systems/08_%D9%84%D8%AC%D8%A7%D9%86_%D8%A7%D9%84%D8%A7%D9%85%D8%AA%D8%AD%D8%A7%D9%86%D8%A7%D8%AA/DDL_SCHEDULING.sql) | **🆕** 8 جداول + 3 Views + 1 SP + 3 Triggers |
+| [DDL.sql](file:///c:/Users/mousa/Desktop/system/school_system-erp/systems/08_%D9%84%D8%AC%D8%A7%D9%86_%D8%A7%D9%84%D8%A7%D9%85%D8%AA%D8%AD%D8%A7%D9%86%D8%A7%D8%AA/DDL.sql) | استبدال ENUM `exam_type` بـ FK إلى `lookup_exam_types` |
+| [README.md](file:///c:/Users/mousa/Desktop/system/school_system-erp/systems/08_%D9%84%D8%AC%D8%A7%D9%86_%D8%A7%D9%84%D8%A7%D9%85%D8%AA%D8%AD%D8%A7%D9%86%D8%A7%D8%AA/README.md) | عنوان جديد ETDS v2.0 + توثيق الجداول الجديدة |
+
+**الجداول الجديدة في DDL_SCHEDULING.sql:**
+- `lookup_exam_types` — أنواع الاختبارات الموحدة (شهري/نصفي/نهائي/عملي/أخرى)
+- `lookup_exam_time_slots` — الفترات الزمنية (8-10، 10-12، إلخ)
+- `lookup_exam_venues` — أنواع أماكن الاختبار (فصل/لجنة)
+- `exam_timetable` — الجدول الزمني للاختبارات (**يحل محل exam_schedules**)
+- `lookup_proctor_roles` — أدوار المراقبين
+- `exam_proctors` — ربط المعلمين بالمراقبة
+- `exam_period_templates` — قوالب فترات قابلة لإعادة الاستخدام
+- `exam_session_periods` — ربط الجلسات بالفترات
+
+---
+
+### System 05 — نظام الدرجات والتقويم الذكي (SGAS v4.0)
+
+| الملف | التغيير |
+|-------|---------|
+| [DDL_EXAMS.sql](file:///c:/Users/mousa/Desktop/system/school_system-erp/systems/05_%D8%A7%D9%84%D8%AA%D8%B9%D9%84%D9%8A%D9%85_%D9%88%D8%A7%D9%84%D8%AF%D8%B1%D8%AC%D8%A7%D8%AA/DDL_EXAMS.sql) | حذف `exam_schedules` (→ System 08)، State Machine للفترات، FK بدل ENUM |
+| [DDL_POLICIES.sql](file:///c:/Users/mousa/Desktop/system/school_system-erp/systems/05_%D8%A7%D9%84%D8%AA%D8%B9%D9%84%D9%8A%D9%85_%D9%88%D8%A7%D9%84%D8%AF%D8%B1%D8%AC%D8%A7%D8%AA/DDL_POLICIES.sql) | `exam_type_id` FK + `is_default` + `teacher_assignments` |
+| [DDL_MONTHLY.sql](file:///c:/Users/mousa/Desktop/system/school_system-erp/systems/05_%D8%A7%D9%84%D8%AA%D8%B9%D9%84%D9%8A%D9%85_%D9%88%D8%A7%D9%84%D8%AF%D8%B1%D8%AC%D8%A7%D8%AA/DDL_MONTHLY.sql) | Denormalization (`semester_id`, `academic_year_id`) + trigger حدود |
+| [DDL_RESULTS.sql](file:///c:/Users/mousa/Desktop/system/school_system-erp/systems/05_%D8%A7%D9%84%D8%AA%D8%B9%D9%84%D9%8A%D9%85_%D9%88%D8%A7%D9%84%D8%AF%D8%B1%D8%AC%D8%A7%D8%AA/DDL_RESULTS.sql) | `exam_timetable` FK في SPs + إزالة كل ENUM |
+| [DDL_AUDIT.sql](file:///c:/Users/mousa/Desktop/system/school_system-erp/systems/05_%D8%A7%D9%84%D8%AA%D8%B9%D9%84%D9%8A%D9%85_%D9%88%D8%A7%D9%84%D8%AF%D8%B1%D8%AC%D8%A7%D8%AA/DDL_AUDIT.sql) | `COALESCE(@current_user_id)` + `exam_timetable` FK |
+| [DDL_REPORTS.sql](file:///c:/Users/mousa/Desktop/system/school_system-erp/systems/05_%D8%A7%D9%84%D8%AA%D8%B9%D9%84%D9%8A%D9%85_%D9%88%D8%A7%D9%84%D8%AF%D8%B1%D8%AC%D8%A7%D8%AA/DDL_REPORTS.sql) | **🆕** `lookup_grade_descriptions` + `fn_get_grade_description` مرن |
+| [DDL_TOOLS.sql](file:///c:/Users/mousa/Desktop/system/school_system-erp/systems/05_%D8%A7%D9%84%D8%AA%D8%B9%D9%84%D9%8A%D9%85_%D9%88%D8%A7%D9%84%D8%AF%D8%B1%D8%AC%D8%A7%D8%AA/DDL_TOOLS.sql) | **🆕** 4 SPs لنسخ الإعدادات السنوية |
+| [README.md](file:///c:/Users/mousa/Desktop/system/school_system-erp/systems/05_%D8%A7%D9%84%D8%AA%D8%B9%D9%84%D9%8A%D9%85_%D9%88%D8%A7%D9%84%D8%AF%D8%B1%D8%AC%D8%A7%D8%AA/README.md) | v4.0 + هيكل 9 ملفات + جدول محدث |
+
+---
+
+## ملخص الملاحظات المعالجة (من التحليل المعماري)
+
+| # | الملاحظة | الحل |
+|---|----------|------|
+| §1.1 | `exam_schedules` مكرر بين System 05/08 | نُقل إلى System 08 كـ `exam_timetable` |
+| §1.2 | `exam_type` ENUM في كل مكان | جدول موحد `lookup_exam_types` |
+| §1.3 | `exam_session_periods` بدون foreign keys | أُعيد بناؤه في [DDL_SCHEDULING.sql](file:///c:/Users/mousa/Desktop/system/school_system-erp/systems/08_%D9%84%D8%AC%D8%A7%D9%86_%D8%A7%D9%84%D8%A7%D9%85%D8%AA%D8%AD%D8%A7%D9%86%D8%A7%D8%AA/DDL_SCHEDULING.sql) مع FKs |
+| §2.1 | `exam_period.type` ENUM | FK إلى `lookup_exam_types` |
+| §2.2 | `@current_user_id` بدون fallback | `COALESCE(@current_user_id, NULL)` |
+| §2.3 | `grading_policies.exam_period_type` ENUM | FK `exam_type_id` |
+| §2.4 | لا يوجد ربط معلم → مادة → صف | جدول `teacher_assignments` |
+| §2.5 | Denormalization مفقود | `semester_id` + `academic_year_id` في `monthly_grades` |
+| §2.6 | لا تحقق من حدود الدرجات اليدوية | Trigger `trg_monthly_grades_validate_manual` |
+| §3.1 | لا واجهة لنسخ الإعدادات بين الأعوام | [DDL_TOOLS.sql](file:///c:/Users/mousa/Desktop/system/school_system-erp/systems/05_%D8%A7%D9%84%D8%AA%D8%B9%D9%84%D9%8A%D9%85_%D9%88%D8%A7%D9%84%D8%AF%D8%B1%D8%AC%D8%A7%D8%AA/DDL_TOOLS.sql) مع 4 SPs |
+| §3.2 | أوصاف التقديرات hardcoded | `lookup_grade_descriptions` + fn محدثة |
+
+---
+
+### تحديثات الاعتمادات الإضافية (Phase 4)
+
+لضمان عمل النظام بشكل متكامل، قمنا بتحديث الأنظمة المرتبطة:
+
+| الملف | التغيير |
+|-------|---------|
+| **System 15 (لوحة المعلومات)** | تحديث `v_bi_academic_kpis` و `v_bi_teacher_efficiency` لاستخدام `exam_timetable` |
+| **System 16 (التقارير)** | تحديث `v_report_grades_detailed` لاستخدام `exam_timetable` |
+| **DEMO_DATA.sql** | تحديث شامل لبيانات التجربة (v4.0) باستخدام الجداول الجديدة والـ IDs |
+| **RUN_UPDATE_v4.sql** | **🚀 سكربت التنفيذ الشامل**: ملف واحد لتطبيق كل التحديثات دفعة واحدة |
+
+---
+
+## الخطوات التالية
+
+1. **تشغيل التحديث:** استخدم الملف [RUN_UPDATE_v4.sql](file:///c:/Users/mousa/Desktop/system/school_system-erp/systems/05_%D8%A7%D9%84%D8%AA%D8%B9%D9%84%D9%8A%D9%85_%D9%88%D8%A7%D9%84%D8%AF%D8%B1%D8%AC%D8%A7%D8%AA/RUN_UPDATE_v4.sql) لتطبيق التغييرات على قاعدة البيانات.
+2. **تجربة البيانات:** [DEMO_DATA.sql](file:///c:/Users/mousa/Desktop/system/school_system-erp/systems/05_%D8%A7%D9%84%D8%AA%D8%B9%D9%84%D9%8A%D9%85_%D9%88%D8%A7%D9%84%D8%AF%D8%B1%D8%AC%D8%A7%D8%AA/DEMO_DATA.sql) يوفر سيناريو كامل (رياضيات، عربي، إنجليزي) مع درجات وواجبات.
+3. **التحقق:** راجع لوحة المعلومات (System 15) والتقارير (System 16) للتأكد من ظهور البيانات بشكل صحيح.

@@ -1,0 +1,631 @@
+# 🏗️ تحليل معماري شامل — نظام ERP المدرسي الذكي (SGAS v3.3)
+
+> **المحلل:** Senior System Architect Review
+> **التاريخ:** 2026-02-19
+> **النطاق:** System 05 (التعليم والدرجات) + System 08 (لجان الامتحانات) + التكاملات
+
+---
+
+## 📋 ملخص تنفيذي
+
+النظام مصمم بنضج ملحوظ — تقسيم الملفات واضح، الحوكمة بالـ Triggers قوية، والمرونة عبر `grading_policies` و `custom_components` ممتازة. إلا أن التحليل العميق كشف عن **18 ملاحظة** تتراوح بين حرجة ومتوسطة، مصنفة كالتالي:
+
+| التصنيف | العدد | الخطورة |
+|---------|-------|---------|
+| 🔴 مشاكل منطقية حرجة | 5 | عالية |
+| 🟡 نقاط ضعف معمارية | 7 | متوسطة |
+| 🟢 تحسينات UX وتبسيط | 6 | منخفضة-متوسطة |
+
+---
+
+## 🔴 القسم 1: مشاكل منطقية حرجة
+
+---
+
+### 1.1 ❌ غياب منع تعارض مواعيد الاختبارات للطالب
+
+**المشكلة:**
+لا يوجد أي تحقق يمنع جدولة اختبارَين لنفس الطالب في نفس التاريخ والوقت. الجدول `exam_schedules` يحتوي `UNIQUE KEY uk_exam (exam_period_id, subject_id, grade_level_id)` — أي يمنع فقط تكرار نفس المادة في نفس الفترة والصف، لكنه **لا يمنع** تعارض الأوقات.
+
+**السبب:**
+الـ `start_time` و `duration_minutes` كلاهما `NULL`able — مما يعني أن الوقت اختياري أصلاً.
+
+**الأثر:**
+- طالب يُجدول له اختبار رياضيات واختبار علوم في نفس الساعة.
+- مشكلة خطيرة في الاختبارات الموحدة (الاختبار النهائي).
+
+**الحل المقترح:**
+
+```sql
+-- 1) جعل start_time NOT NULL (على الأقل للاختبارات النهائية)
+-- 2) إضافة Trigger يمنع تعارض المواعيد:
+
+CREATE TRIGGER trg_exam_schedule_time_conflict
+BEFORE INSERT ON exam_schedules
+FOR EACH ROW
+BEGIN
+    DECLARE v_conflict INT DEFAULT 0;
+    IF NEW.start_time IS NOT NULL AND NEW.duration_minutes IS NOT NULL THEN
+        SELECT COUNT(*) INTO v_conflict
+        FROM exam_schedules es
+        WHERE es.exam_period_id = NEW.exam_period_id
+          AND es.grade_level_id = NEW.grade_level_id
+          AND es.exam_date = NEW.exam_date
+          AND es.id != NEW.id
+          AND es.start_time IS NOT NULL
+          AND es.duration_minutes IS NOT NULL
+          AND (
+              NEW.start_time < ADDTIME(es.start_time, SEC_TO_TIME(es.duration_minutes * 60))
+              AND ADDTIME(NEW.start_time, SEC_TO_TIME(NEW.duration_minutes * 60)) > es.start_time
+          );
+        IF v_conflict > 0 THEN
+            SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'يوجد تعارض في وقت الاختبار مع اختبار آخر لنفس الصف';
+        END IF;
+    END IF;
+END;
+```
+
+---
+
+### 1.2 ❌ عدم التحقق من تطابق الطالب مع الصف في درجات الاختبار
+
+**المشكلة:**
+في `student_exam_scores`، يُربط `enrollment_id` بـ `exam_schedule_id` بدون تحقق أن الطالب ينتمي فعلاً للصف (`grade_level_id`) المحدد في جدول الاختبار.
+
+**السبب:**
+الـ `sp_populate_exam_scores` يستخدم `WHERE c.grade_level_id = v_grade_level_id` عند الإسناد الآلي، لكن **الإدخال اليدوي** لا يمر عبر هذا التحقق — والـ Trigger `trg_exam_score_validate_insert` لا يتحقق من تطابق الصف.
+
+**الأثر:**
+- إمكانية رصد درجة لطالب في اختبار صف أعلى أو أدنى.
+- تضخم وتشوه في النتائج عند الحسابات الآلية.
+
+**الحل المقترح:**
+إضافة تحقق في `trg_exam_score_validate_insert`:
+
+```sql
+-- داخل Trigger INSERT على student_exam_scores:
+DECLARE v_student_grade INT;
+DECLARE v_exam_grade INT;
+
+SELECT c.grade_level_id INTO v_student_grade
+FROM student_enrollments se
+JOIN classrooms c ON se.classroom_id = c.id
+WHERE se.id = NEW.enrollment_id;
+
+SELECT es.grade_level_id INTO v_exam_grade
+FROM exam_schedules es
+WHERE es.id = NEW.exam_schedule_id;
+
+IF v_student_grade != v_exam_grade THEN
+    SIGNAL SQLSTATE '45000'
+    SET MESSAGE_TEXT = 'الطالب لا ينتمي للصف المحدد في هذا الاختبار';
+END IF;
+```
+
+---
+
+### 1.3 ❌ خطر في حساب النسبة المئوية السنوية — ربط بـ MONTHLY فقط
+
+**المشكلة:**
+في `sp_calculate_annual_results` (السطر 382-385)، يتم الربط مع `grading_policies` بشرط:
+```sql
+AND gp.exam_period_type = 'MONTHLY'
+```
+هذا يعني أن الدرجة العظمى الكلية تُحسب بناءً على سياسة `MONTHLY` فقط!
+
+**الأثر:**
+- إذا كان الاختبار النهائي (`FINAL`) له وزن مختلف في السياسة عن الشهري، فإن حساب `annual_percentage` و `max_possible_total` سيكون **خاطئاً**.
+- مثال: لو الشهري 30 درجة والنهائي 70 — النظام لن يحسب سوى الـ 30.
+
+**الحل المقترح:**
+تعديل المنطق ليجمع أوزان جميع أنواع الفترات (`MONTHLY` + `FINAL`) أو استخدام جدول منفصل يحدد الدرجة العظمى الإجمالية لكل مادة/صف/عام:
+
+```sql
+-- استبدال الربط الحالي بربط يجمع كل أنواع الفترات:
+LEFT JOIN (
+    SELECT academic_year_id, grade_level_id, subject_id,
+           SUM(max_exam_score + max_homework_score + max_attendance_score
+               + max_activity_score + max_contribution_score) AS total_max_all_types
+    FROM grading_policies
+    GROUP BY academic_year_id, grade_level_id, subject_id
+) gp_all ON gp_all.academic_year_id = p_academic_year_id
+    AND gp_all.grade_level_id = v_grade_level_id
+    AND gp_all.subject_id = ag.subject_id
+```
+
+---
+
+### 1.4 ❌ لا يوجد ربط بين `monthly_grades` والفترات الامتحانية
+
+**المشكلة:**
+`monthly_grades.exam_score` يُحسب في `sp_calculate_monthly_grades` عبر `exam_date BETWEEN v_month_start AND v_month_end` — أي حسب التاريخ فقط. لكن **لا يوجد ربط رسمي** بين `monthly_grades` و `exam_periods`.
+
+**الأثر:**
+- إذا كانت فترة امتحانية تمتد عبر شهرين أكاديميين، ستُحسب درجات الاختبار مرتين (مرة في كل شهر).
+- مقابلاً، اختبار يقع في يوم خارج نطاق أي شهر → درجته تضيع.
+
+**الحل المقترح:**
+ربط `exam_score` بالفترة الامتحانية وليس بالتاريخ فقط:
+
+```sql
+-- إضافة عمود ربط اختياري:
+ALTER TABLE monthly_grades ADD COLUMN exam_period_id INT UNSIGNED NULL;
+
+-- أو ربط الحساب عبر exam_period_id بدل التاريخ:
+-- في sp_calculate_monthly_grades:
+LEFT JOIN (
+    SELECT ses.enrollment_id, SUM(ses.score) AS total_score, SUM(esched.max_score) AS total_max
+    FROM student_exam_scores ses
+    JOIN exam_schedules esched ON ses.exam_schedule_id = esched.id
+    JOIN exam_periods ep ON esched.exam_period_id = ep.id
+    JOIN academic_months am ON ep.start_date BETWEEN am.start_date AND am.end_date
+    WHERE am.id = p_month_id
+      AND esched.subject_id = p_subject_id
+      AND ses.is_present = TRUE
+    GROUP BY ses.enrollment_id
+) exam_data ON exam_data.enrollment_id = se.id
+```
+
+---
+
+### 1.5 ❌ عدم وجود تحقق من تعارض جلسات لجان الامتحانات مع جدول الاختبارات
+
+**المشكلة:**
+جدول `exam_session_periods` يربط `exam_sessions` (System 08) بـ `exam_periods` (System 05)، لكن **لا يوجد أي تحقق** من:
+1. أن تواريخ الجلسة (`exam_sessions.start_date - end_date`) تتقاطع فعلاً مع تواريخ الفترة (`exam_periods.start_date - end_date`).
+2. أن اللجان في الجلسة تغطي الصفوف المجدولة في الفترة الامتحانية.
+
+كما أن في System 08، `exam_assignments` لا يملك ربطاً مع `exam_schedules` (جدول مواعيد الاختبارات).
+
+**الأثر:**
+- ممكن ربط جلسة لجان بفترة امتحانية بدون أي تقاطع زمني.
+- طالب معيّن في لجنة لكن ليس لديه اختبار في ذلك اليوم.
+- قاعة محجوزة لاختبار بدون لجنة معيّنة لها.
+
+**الحل المقترح:**
+```sql
+-- Trigger على exam_session_periods:
+CREATE TRIGGER trg_esp_validate_dates
+BEFORE INSERT ON exam_session_periods
+FOR EACH ROW
+BEGIN
+    DECLARE v_session_start DATE;
+    DECLARE v_session_end DATE;
+    DECLARE v_period_start DATE;
+    DECLARE v_period_end DATE;
+
+    SELECT start_date, end_date INTO v_session_start, v_session_end
+    FROM exam_sessions WHERE id = NEW.exam_session_id;
+
+    SELECT start_date, end_date INTO v_period_start, v_period_end
+    FROM exam_periods WHERE id = NEW.exam_period_id;
+
+    -- التحقق من وجود تقاطع زمني
+    IF v_session_end < v_period_start OR v_session_start > v_period_end THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'لا يوجد تقاطع زمني بين الجلسة والفترة الامتحانية';
+    END IF;
+END;
+```
+
+---
+
+## 🟡 القسم 2: نقاط ضعف معمارية
+
+---
+
+### 2.1 ⚠️ تكرار الفترات الامتحانية كل عام بدون قوالب
+
+**المشكلة:**
+جدول `exam_periods` يتطلب إنشاء فترات جديدة كل عام دراسي يدوياً. لا يوجد مفهوم **قالب فترات** (Period Template) يُعرّف مرة واحدة ويُعاد استخدامه.
+
+**الأثر:**
+- جهد إداري متكرر كل عام.
+- خطر عدم الاتساق في التسمية والأنواع بين الأعوام.
+
+**الحل:**
+```sql
+CREATE TABLE IF NOT EXISTS exam_period_templates (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(100) NOT NULL,
+    type ENUM('MONTHLY','MIDTERM','FINAL','DIAGNOSTIC','CUSTOM') NOT NULL,
+    relative_start_week TINYINT UNSIGNED COMMENT 'بداية نسبية من أول الفصل (أسبوع)',
+    duration_days TINYINT UNSIGNED COMMENT 'المدة بالأيام',
+    is_active BOOLEAN DEFAULT TRUE
+);
+
+-- Procedure لتوليد الفترات من القوالب:
+-- sp_generate_exam_periods(academic_year_id, semester_id)
+```
+
+---
+
+### 2.2 ⚠️ استخدام `@current_user_id` في Triggers التدقيق
+
+**المشكلة:**
+في [DDL_AUDIT.sql](file:///c:/Users/mousa/Desktop/system/school_system-erp/systems/05_التعليم_والدرجات/DDL_AUDIT.sql)، يُستخدم `@current_user_id` (متغير Session) لتتبع من عدّل الدرجات. هذا المتغير **لا يُضبط تلقائياً** — يعتمد على أن التطبيق يضبطه قبل كل عملية.
+
+**الأثر:**
+- إذا نسي التطبيق ضبط المتغير → كل سجلات التدقيق تصبح `NULL` → فقدان المساءلة.
+
+**الحل:**
+```sql
+-- بديل 1: إضافة عمود updated_by في الجداول المصدرية
+ALTER TABLE monthly_grades ADD COLUMN updated_by_user_id INT UNSIGNED NULL;
+
+-- بديل 2: استخدام CURRENT_USER() كفالبك
+SET changed_by_user_id = COALESCE(@current_user_id, 
+    (SELECT id FROM users WHERE username = SUBSTRING_INDEX(CURRENT_USER(), '@', 1) LIMIT 1));
+```
+
+---
+
+### 2.3 ⚠️ `grading_policies` مطلوبة لكل تقاطع (عام × صف × مادة × نوع) — انفجار بيانات
+
+**المشكلة:**
+كل سجل في `grading_policies` يمثل تقاطعاً واحداً (عام + صف + مادة + نوع فترة). لـ 12 صف × 10 مواد × 4 أنواع = **480 سياسة لكل عام!**
+
+**الأثر:**
+- عبء إدخال كبير على المسؤول.
+- احتمال نسيان إنشاء سياسة → كسر الـ Trigger الذي يتحقق منها → عدم القدرة على جدولة اختبارات.
+
+**الحل:**
+1. **سياسة افتراضية**: إضافة سياسة عامة كـ fallback:
+```sql
+ALTER TABLE grading_policies 
+ADD COLUMN is_default BOOLEAN DEFAULT FALSE COMMENT 'سياسة افتراضية للصف بغض النظر عن المادة';
+
+-- الـ Trigger يبحث أولاً عن سياسة خاصة، ثم يسقط على الافتراضية
+```
+2. **نسخ من العام السابق**: Procedure `sp_copy_policies_from_year(old_year, new_year)`.
+
+---
+
+### 2.4 ⚠️ غياب صلاحيات المعلم على مستوى الجدول
+
+**المشكلة:**
+لا يوجد جدول يربط المعلم بالمادة والفصل (مثل `teacher_assignments`). أي معلم يمكنه نظرياً رصد درجات لأي مادة وأي فصل.
+
+**السبب:**
+النظام يعتمد على `created_by` (FK → users) فقط للتوثيق، بدون تحقق أن المستخدم مخوّل لهذه المادة/الفصل.
+
+**الحل:**
+يحتاج النظام جدول ربط (يمكن أن يكون في System 03 أو 11):
+```sql
+CREATE TABLE IF NOT EXISTS teacher_assignments (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    user_id INT UNSIGNED NOT NULL COMMENT 'المعلم',
+    subject_id INT UNSIGNED NOT NULL,
+    classroom_id INT UNSIGNED NOT NULL,
+    academic_year_id INT UNSIGNED NOT NULL,
+    semester_id INT UNSIGNED NULL COMMENT 'NULL = كلا الفصلين',
+    is_active BOOLEAN DEFAULT TRUE,
+    UNIQUE KEY uk_ta (user_id, subject_id, classroom_id, academic_year_id)
+);
+```
+
+---
+
+### 2.5 ⚠️ `exam_schedules` على مستوى الصف لا الفصل — لكن الدرجات على مستوى الطالب
+
+**المشكلة:**
+`exam_schedules.grade_level_id` يحدد الاختبار على مستوى **الصف** (كل الشعب). لكن `student_exam_scores` يرتبط بـ `enrollment_id` الذي يتبع فصل/شعبة محددة. هذا التصميم صحيح مبدئياً لكن يفتقر لوسيط يخدم السيناريوهات التالية:
+
+**سيناريوهات إشكالية:**
+- اختبار موحد للصف → كيف يرصد معلم الشعبة (أ) فقط طلابه بدون التأثير على الشعب الأخرى؟
+- طالب منقول بين الشعب خلال الفترة الامتحانية → أين تذهب درجاته؟
+
+**الحل:**
+إضافة `classroom_id` اختياري في `exam_schedules` للسماح بجدولة على مستوى الشعبة عند الحاجة:
+```sql
+ALTER TABLE exam_schedules ADD COLUMN classroom_id INT UNSIGNED NULL 
+COMMENT 'اختياري: NULL = كل شعب الصف، قيمة = شعبة محددة';
+```
+
+---
+
+### 2.6 ⚠️ عدم التحقق من الحد الأقصى لدرجات المكونات اليدوية في `monthly_grades`
+
+**المشكلة:**
+`activity_score` و `contribution_score` في `monthly_grades` — لا يوجد Trigger يتحقق أنها **لا تتجاوز** الحدود المعرّفة في `grading_policies` (`max_activity_score`, `max_contribution_score`).
+
+**الأثر:**
+معلم يدخل `activity_score = 50` بينما السياسة تحدد `max_activity_score = 5`.
+
+**الحل:**
+```sql
+-- Trigger BEFORE INSERT/UPDATE على monthly_grades:
+DECLARE v_max_activity DECIMAL(5,2);
+DECLARE v_max_contribution DECIMAL(5,2);
+
+SELECT gp.max_activity_score, gp.max_contribution_score
+INTO v_max_activity, v_max_contribution
+FROM grading_policies gp
+JOIN student_enrollments se ON se.id = NEW.enrollment_id
+JOIN classrooms c ON c.id = se.classroom_id
+WHERE gp.academic_year_id = c.academic_year_id
+  AND gp.grade_level_id = c.grade_level_id
+  AND gp.subject_id = NEW.subject_id
+  AND gp.exam_period_type = 'MONTHLY'
+LIMIT 1;
+
+IF NEW.activity_score > COALESCE(v_max_activity, 999) THEN
+    SIGNAL SQLSTATE '45000'
+    SET MESSAGE_TEXT = 'درجة النشاط تتجاوز الحد الأقصى المعتمد';
+END IF;
+
+IF NEW.contribution_score > COALESCE(v_max_contribution, 999) THEN
+    SIGNAL SQLSTATE '45000'
+    SET MESSAGE_TEXT = 'درجة المساهمة تتجاوز الحد الأقصى المعتمد';
+END IF;
+```
+
+---
+
+### 2.7 ⚠️ عدم وجود `semester_id` في `monthly_grades` — يعتمد على `month_id` فقط
+
+**المشكلة:**
+`monthly_grades` لا يحتوي `semester_id` مباشرة. لمعرفة الفصل، يجب الضم مع `academic_months → semesters`. صحيح أنه مشتق، لكن:
+
+**الأثر:**
+- كل الاستعلامات تحتاج JOIN إضافي.
+- لا يمكن وضع فهرس مركب على `(semester_id, subject_id, enrollment_id)` مباشرة.
+
+**الحل:** (اختياري حسب الأداء)
+```sql
+ALTER TABLE monthly_grades ADD COLUMN semester_id INT UNSIGNED
+GENERATED ALWAYS AS (
+    (SELECT am.semester_id FROM academic_months am WHERE am.id = month_id)
+) STORED;
+-- ملاحظة: MySQL لا يدعم هذا. البديل: عمود عادي يُملأ من Trigger.
+```
+
+---
+
+## 🟢 القسم 3: تحسينات UX وتبسيط
+
+---
+
+### 3.1 💡 عدم وجود واجهة لنسخ بيانات العام السابق
+
+**المشكلة:**
+كل عام دراسي جديد يتطلب:
+- إنشاء سياسات جديدة (480+ سجل).
+- إنشاء فترات امتحانية جديدة.
+- إنشاء جلسات لجان جديدة.
+
+**الحل:**
+إنشاء مجموعة Procedures:
+```sql
+-- نسخ السياسات
+CALL sp_copy_policies(old_year_id, new_year_id);
+-- نسخ الفترات الامتحانية (بدون تواريخ)
+CALL sp_copy_exam_periods(old_year_id, new_year_id, new_semester1_id, new_semester2_id);
+-- نسخ قواعد النقل
+CALL sp_copy_outcome_rules(old_year_id, new_year_id);
+```
+
+---
+
+### 3.2 💡 تحسين دالة التقدير `fn_get_grade_description`
+
+**المشكلة:**
+الحدود (90, 80, 65, 50) مكتوبة `hardcoded` في الدالة. كل مدرسة قد تختلف.
+
+**الحل:**
+```sql
+CREATE TABLE IF NOT EXISTS lookup_grade_descriptions (
+    id TINYINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    min_percentage DECIMAL(5,2) NOT NULL,
+    max_percentage DECIMAL(5,2) NOT NULL,
+    description_ar VARCHAR(50) NOT NULL,
+    description_en VARCHAR(50) NULL,
+    academic_year_id INT UNSIGNED NULL COMMENT 'NULL = عام لكل السنوات',
+    sort_order TINYINT UNSIGNED DEFAULT 0
+);
+```
+
+---
+
+### 3.3 💡 نقص في نظام المراقبين (Proctors)
+
+**المشكلة:**
+System 08 (لجان الامتحانات) لا يحتوي جدول ربط المراقبين بالجلسات واللجان.
+
+**الأثر:**
+- لا يمكن التحقق من تعارض مراقب بين لجنتين.
+- لا يمكن إصدار كشوفات المراقبين.
+
+**الحل:**
+```sql
+-- في System 08:
+CREATE TABLE IF NOT EXISTS exam_proctors (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    exam_session_id INT UNSIGNED NOT NULL,
+    committee_id INT UNSIGNED NOT NULL,
+    employee_id INT UNSIGNED NOT NULL COMMENT 'FK → employees',
+    role ENUM('رئيس_لجنة','مراقب','مراقب_احتياطي') NOT NULL DEFAULT 'مراقب',
+    assignment_date DATE NULL,
+    is_active BOOLEAN DEFAULT TRUE,
+
+    UNIQUE KEY uk_proctor_session_committee (exam_session_id, committee_id, employee_id),
+    -- منع المراقب من التعيين في لجنتين بنفس الجلسة:
+    UNIQUE KEY uk_proctor_single_committee (exam_session_id, employee_id),
+
+    FOREIGN KEY (exam_session_id) REFERENCES exam_sessions(id) ON DELETE CASCADE,
+    FOREIGN KEY (committee_id) REFERENCES exam_committees(id) ON DELETE CASCADE,
+    FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE
+);
+```
+
+---
+
+### 3.4 💡 لا يوجد سجل حالة (State Machine) لعملية الاختبار
+
+**المشكلة:**
+مسار عملية الاختبار (جدولة → رصد → مراجعة → اعتماد) لا يُتتبع بشكل منظم. `is_locked` في `exam_periods` ثنائي (مقفل/مفتوح) فقط.
+
+**الحل:**
+```sql
+ALTER TABLE exam_periods ADD COLUMN status 
+    ENUM('DRAFT','SCHEDULING','SCORING','REVIEW','APPROVED','ARCHIVED') 
+    DEFAULT 'DRAFT';
+```
+
+---
+
+### 3.5 💡 غياب `academic_year_id` في `monthly_grades`
+
+**المشكلة:**
+يمكن استنتاج العام من `month_id → academic_months → semesters → academic_years`، لكن كل استعلام يحتاج 3 JOINs.
+
+**الحل:** إضافة عمود denormalized:
+```sql
+ALTER TABLE monthly_grades ADD COLUMN academic_year_id INT UNSIGNED NULL;
+-- يُملأ من Trigger
+```
+
+---
+
+### 3.6 💡 حدود ENUM في مقابل Lookup Tables
+
+**المشكلة:**
+بعض الأعمدة تستخدم `ENUM` بينما المكافئ يستخدم Lookup Table:
+
+| العمود | النوع | الأفضل |
+|--------|-------|--------|
+| `exam_periods.type` | ENUM | Lookup Table ✅ |
+| `exam_sessions.exam_type` | ENUM (بالعربي) | Lookup Table ✅ |
+| `grading_policies.exam_period_type` | ENUM | يجب أن يتطابق مع Lookup |
+
+**الأثر:**
+- `exam_periods.type` يستخدم `MONTHLY/MIDTERM/FINAL/DIAGNOSTIC/CUSTOM` (إنجليزي).
+- `exam_sessions.exam_type` يستخدم `شهري/فصلي/نهائي/أخرى` (عربي).
+- لا يوجد ربط بينهما!
+
+**الحل:**
+توحيد نوع الاختبار في Lookup Table واحد:
+```sql
+CREATE TABLE IF NOT EXISTS lookup_exam_types (
+    id TINYINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    code VARCHAR(20) NOT NULL UNIQUE,
+    name_ar VARCHAR(50) NOT NULL,
+    name_en VARCHAR(50) NULL
+);
+INSERT INTO lookup_exam_types (code, name_ar, name_en) VALUES
+('MONTHLY', 'شهري', 'Monthly'),
+('MIDTERM', 'منتصف الفصل', 'Midterm'),
+('FINAL', 'نهائي', 'Final'),
+('DIAGNOSTIC', 'تشخيصي', 'Diagnostic'),
+('CUSTOM', 'مخصص', 'Custom');
+```
+
+---
+
+## 🔗 القسم 4: تحليل التكامل بين الأنظمة
+
+---
+
+### خريطة التبعيات الحرجة
+
+```
+System 01 (Users/Auth)
+    └──→ كل الأنظمة (created_by, locked_by, approved_by)
+
+System 02 (Academic Core)
+    ├──→ System 05 (academic_years, semesters, academic_months, grade_levels, classrooms, subjects)
+    └──→ System 08 (academic_years, semesters, classrooms)
+
+System 04 (Students)
+    ├──→ System 05 (student_enrollments, student_attendance)
+    └──→ System 08 (student_enrollments)
+
+System 05 (Teaching/Grades)
+    ├──→ System 08 (exam_session_periods — الربط)
+    ├──→ System 16 (التقارير)
+    └──→ System 17 (الشهادات)
+
+System 08 (Exam Committees)
+    └──→ System 05 (exam_session_periods)
+```
+
+### نقاط التكامل المفقودة
+
+| من | إلى | العلاقة المفقودة |
+|----|-----|-----------------|
+| System 08 | System 05 | لا يوجد ربط `exam_assignments` مع `exam_schedules` — الطالب مُعيّن في لجنة لكن لا نعرف لأي اختبار |
+| System 05 | System 03 | لا يوجد جدول `teacher_assignments` يحدد من يدرّس ماذا |
+| System 08 | System 03 | لا يوجد جدول مراقبين `exam_proctors` |
+| System 11 | System 05 | لا يوجد ربط بين جدول الحصص واللجان (لمنع تعارض القاعات) |
+
+---
+
+## 📊 القسم 5: كتالوج قواعد التحقق (Validation Rules)
+
+### القواعد الموجودة ✅
+| # | القاعدة | الموقع |
+|---|---------|--------|
+| 1 | الدرجة ≤ الدرجة العظمى | `trg_exam_score_validate_insert` |
+| 2 | الدرجة ≥ 0 | `trg_exam_score_validate_insert` |
+| 3 | غائب → الدرجة = 0 | `trg_exam_score_validate_insert` |
+| 4 | تاريخ الاختبار داخل الفترة | `trg_exam_schedule_validate_insert` |
+| 5 | الدرجة العظمى ≤ حد السياسة | `trg_exam_schedule_validate_insert` |
+| 6 | قفل الفترة يمنع التعديل | كل Triggers القفل |
+| 7 | الاعتماد يمنع تعديل الحقول الجوهرية | `trg_semester_grade_lock` et al. |
+| 8 | الواجب → تاريخ التسليم ≥ تاريخ الإعطاء | `trg_homework_set_month_insert` |
+| 9 | الدرجة اليدوية ≤ العظمى للواجب | `trg_student_homework_validate_insert` |
+| 10 | المكون المخصص ≤ العظمى للمكون | `trg_mccs_validate_insert` |
+
+### القواعد المفقودة ❌ (المقترحة)
+| # | القاعدة | الأولوية |
+|---|---------|----------|
+| 1 | منع تعارض وقت اختبارين لنفس الصف | 🔴 حرجة |
+| 2 | الطالب ينتمي للصف في `exam_schedules` | 🔴 حرجة |
+| 3 | `activity_score` ≤ `max_activity_score` | 🟡 عالية |
+| 4 | `contribution_score` ≤ `max_contribution_score` | 🟡 عالية |
+| 5 | المراقب في لجنة واحدة فقط بنفس الجلسة | 🟡 عالية |
+| 6 | تقاطع زمني بين الجلسة والفترة | 🟡 عالية |
+| 7 | عدم ترك لجنة بدون طلاب | 🟢 متوسطة |
+| 8 | عدم ترك لجنة بدون مراقب | 🟢 متوسطة |
+| 9 | منع إعادة حساب نتائج معتمدة | 🟡 عالية |
+
+---
+
+## 🏆 القسم 6: نقاط القوة في النظام
+
+لتكون المراجعة عادلة، إليك ما يميز هذا النظام:
+
+| الميزة | التقييم |
+|--------|---------|
+| تقسيم DDL إلى 8 ملفات مستقلة | ⭐⭐⭐⭐⭐ |
+| نظام السياسات المرن (`grading_policies` + `custom_components`) | ⭐⭐⭐⭐⭐ |
+| حساب المواظبة والواجبات **آلياً** | ⭐⭐⭐⭐ |
+| Triggers الحوكمة (منع التعديل بعد الاعتماد) | ⭐⭐⭐⭐⭐ |
+| سجل التدقيق مع القيم القديمة/الجديدة | ⭐⭐⭐⭐ |
+| قرارات النقل القابلة للتخصيص (`grading_outcome_rules`) | ⭐⭐⭐⭐⭐ |
+| استراتيجية كسر التعادل المرنة | ⭐⭐⭐⭐ |
+| فصل نظام اللجان كنظام مستقل | ⭐⭐⭐⭐ |
+| الحذف الناعم (`is_active`) المنتشر | ⭐⭐⭐⭐ |
+| `STORED GENERATED` columns لمنع عدم الاتساق | ⭐⭐⭐⭐⭐ |
+
+---
+
+## ✅ خطة العمل المقترحة (مرتبة بالأولوية)
+
+| # | الإجراء | الأولوية | الجهد |
+|---|---------|----------|-------|
+| 1 | إضافة Trigger منع تعارض وقت الاختبارات | 🔴 | منخفض |
+| 2 | إضافة Trigger تطابق الصف في درجات الاختبار | 🔴 | منخفض |
+| 3 | تصحيح حساب النسبة المئوية في `sp_calculate_annual_results` | 🔴 | متوسط |
+| 4 | إضافة Trigger تحقق حدود `activity_score/contribution_score` | 🟡 | منخفض |
+| 5 | إنشاء جدول `exam_proctors` | 🟡 | منخفض |
+| 6 | إضافة Trigger تقاطع زمني `exam_session_periods` | 🟡 | منخفض |
+| 7 | توحيد ENUM → Lookup Table لأنواع الاختبارات | 🟡 | متوسط |
+| 8 | إنشاء `sp_copy_policies` لنسخ بيانات العام | 🟢 | منخفض |
+| 9 | إضافة `exam_period_templates` (قوالب الفترات) | 🟢 | متوسط |
+| 10 | إنشاء `teacher_assignments` | 🟡 | متوسط |
+
+---
+
+> **الختام:** النظام في حالة ممتازة معمارياً، والأساس المتين يسمح بتنفيذ التحسينات المقترحة بسلاسة. التركيز الأول يجب أن يكون على القواعد الخمس الحرجة (1.1-1.5) لأنها تمنع تضارب البيانات الذي قد يصعب إصلاحه لاحقاً.

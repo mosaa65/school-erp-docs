@@ -1,0 +1,125 @@
+# إعادة هيكلة نظام جدولة الاختبارات + تنفيذ جميع التحسينات
+
+## الوصف
+تنفيذ كل التحسينات المقترحة في التحليل المعماري (18 ملاحظة) + إعادة هيكلة شاملة لنظام الاختبارات:
+- **System 08** يصبح النظام الشامل لإدارة الاختبارات: جدولة + لجان + توزيع + مراقبين
+- **System 05** يحتفظ بالفترات الأكاديمية والدرجات فقط (بدون تفاصيل الجدولة)
+
+> [!IMPORTANT]
+> **قرار معماري رئيسي:** جدول الاختبارات (`exam_schedules`) ينتقل من System 05 إلى System 08.
+> الفترة الامتحانية (`exam_periods`) تبقى في System 05 لأنها مرتبطة بالدرجات.
+> System 08 يتولى: أين ومتى يُعقد الاختبار + من يراقب + أين يجلس الطالب.
+
+> [!WARNING]
+> **الاختبارات الشهرية:** تُعامل معاملة خاصة — الطالب يختبر في فصله العادي، في وقت حصة المادة (لا حاجة للجان أو توزيع مقاعد).
+
+---
+
+## التغييرات المقترحة
+
+### المرحلة 1: إعادة هيكلة System 08
+
+#### [NEW] [DDL_SCHEDULING.sql](file:///c:/Users/mousa/Desktop/system/school_system-erp/systems/08_لجان_الامتحانات/DDL_SCHEDULING.sql)
+ملف جدولة الاختبارات الجديد — يحتوي:
+
+1. **`lookup_exam_types`** — جدول مرجعي موحد لأنواع الاختبارات (بدل ENUM)
+   - `MONTHLY`, `MIDTERM`, `FINAL`, `DIAGNOSTIC`, `CUSTOM`
+   - يربط بين System 05 و System 08
+
+2. **`lookup_exam_time_slots`** — الفترات الزمنية المتاحة
+   - فترة أولى (8:00-10:00)، فترة ثانية (10:00-12:00)، إلخ
+   - مرتبط بـ `lookup_periods` (صباحي/مسائي)
+
+3. **`exam_timetable`** — جدول الاختبارات الرئيسي (يحل محل `exam_schedules`)
+   - يربط: فترة امتحانية + مادة + صف + يوم (من calendar_master) + فترة زمنية
+   - `venue_type`: ENUM('CLASSROOM', 'COMMITTEE') — شهري في الفصل أم نهائي في لجنة
+   - `classroom_id`: NULL = كل الشعب / قيمة = شعبة محددة
+   - `max_score`: الدرجة العظمى
+   - Trigger: منع تعارض وقت اختبارين لنفس الصف في نفس اليوم/الفترة
+
+4. **`exam_proctors`** — جدول المراقبين
+   - ربط مراقب بلجنة/جلسة مع منع التعيين في لجنتين
+
+5. **`exam_timetable_templates`** — قوالب جدولة قابلة لإعادة الاستخدام
+   - (اختياري) لتسريع الإنشاء السنوي
+
+6. **Triggers:**
+   - `trg_exam_timetable_no_time_conflict` — منع تعارض المواعيد (§1.1)
+   - `trg_exam_timetable_calendar_check` — التاريخ يوم دراسي (calendar_master)
+   - `trg_exam_proctor_no_conflict` — مراقب في لجنة واحدة فقط
+
+7. **Views:**
+   - `v_exam_timetable_by_grade` — جدول اختبارات كل صف
+   - `v_exam_day_schedule` — جدول يوم اختبار كامل
+
+---
+
+#### [MODIFY] [DDL.sql](file:///c:/Users/mousa/Desktop/system/school_system-erp/systems/08_لجان_الامتحانات/DDL.sql)
+- إضافة `exam_session_periods` (ربط الجلسة بالفترة الامتحانية)
+- إضافة Trigger `trg_esp_validate_dates` (§1.5)
+- إضافة `SOURCE DDL_SCHEDULING.sql` في ترتيب التنفيذ
+- تحديث `exam_sessions` لاستخدام `exam_type_id` FK بدل ENUM
+- تحديث الإحصائيات (عدد الجداول)
+
+---
+
+#### [NEW] [README.md](file:///c:/Users/mousa/Desktop/system/school_system-erp/systems/08_لجان_الامتحانات/README_UPDATED.md)
+تحديث شامل للتوثيق
+
+---
+
+### المرحلة 2: تحديث System 05
+
+#### [MODIFY] [DDL_EXAMS.sql](file:///c:/Users/mousa/Desktop/system/school_system-erp/systems/05_التعليم_والدرجات/DDL_EXAMS.sql)
+- **إزالة** `exam_schedules` (انتقل لـ System 08)
+- **إزالة** Triggers المرتبطة بـ `exam_schedules`
+- **إبقاء** `exam_periods` + `student_exam_scores` + `exam_session_periods`
+- **إضافة** Trigger §1.2: تحقق تطابق الصف في `student_exam_scores`
+- **تحديث** `student_exam_scores.exam_schedule_id` → `exam_timetable_id` (FK → System 08)
+- **إضافة** `status` لـ `exam_periods` (§3.4: DRAFT→SCHEDULING→SCORING→REVIEW→APPROVED)
+- **استبدال** ENUM `type` بـ FK → `lookup_exam_types`
+
+#### [MODIFY] [DDL_MONTHLY.sql](file:///c:/Users/mousa/Desktop/system/school_system-erp/systems/05_التعليم_والدرجات/DDL_MONTHLY.sql)
+- **إضافة** `semester_id` و `academic_year_id` (denormalized) في `monthly_grades`
+- **إضافة** Trigger تحقق حدود `activity_score` و `contribution_score` (§2.6)
+
+#### [MODIFY] [DDL_RESULTS.sql](file:///c:/Users/mousa/Desktop/system/school_system-erp/systems/05_التعليم_والدرجات/DDL_RESULTS.sql)
+- **تصحيح** `sp_calculate_annual_results`: الربط بكل أنواع الفترات بدل MONTHLY فقط (§1.3)
+
+#### [MODIFY] [DDL_POLICIES.sql](file:///c:/Users/mousa/Desktop/system/school_system-erp/systems/05_التعليم_والدرجات/DDL_POLICIES.sql)
+- **إضافة** `is_default` في `grading_policies` (§2.3)
+- **استبدال** ENUM `exam_period_type` بـ FK → `lookup_exam_types`
+
+#### [MODIFY] [DDL_AUDIT.sql](file:///c:/Users/mousa/Desktop/system/school_system-erp/systems/05_التعليم_والدرجات/DDL_AUDIT.sql)
+- **تحسين** التعامل مع `@current_user_id` بإضافة COALESCE fallback (§2.2)
+
+#### [MODIFY] [DDL_REPORTS.sql](file:///c:/Users/mousa/Desktop/system/school_system-erp/systems/05_التعليم_والدرجات/DDL_REPORTS.sql)
+- **إنشاء** `lookup_grade_descriptions` بدل دالة hardcoded (§3.2)
+- **تحديث** `fn_get_grade_description` لاستخدام الجدول
+
+#### [NEW] [DDL_TOOLS.sql](file:///c:/Users/mousa/Desktop/system/school_system-erp/systems/05_التعليم_والدرجات/DDL_TOOLS.sql)
+- `sp_copy_policies(old_year, new_year)` — نسخ السياسات (§3.1)
+- `sp_copy_exam_periods(old_year, new_year)` — نسخ الفترات
+- `sp_copy_outcome_rules(old_year, new_year)` — نسخ قواعد النقل
+
+---
+
+### المرحلة 3: إضافات مشتركة
+
+#### [NEW] في System 05 DDL_POLICIES.sql
+- **`teacher_assignments`** — ربط المعلم بالمادة والفصل (§2.4)
+
+---
+
+## خطة التحقق
+
+### التحقق اليدوي (بمراجعة المستخدم)
+1. **مراجعة ملفات DDL**: فتح كل ملف معدّل والتأكد من:
+   - كل FK مشار إليه يشير لجدول موجود
+   - لا يوجد تعارض في أسماء الجداول أو Triggers
+   - ترتيب تنفيذ الملفات صحيح (الاعتماديات مُلبّاة)
+2. **مراجعة المنطق**: التحقق من أن سيناريوهات الاختبارات الشهرية (في الفصل) والنهائية (في لجان) مدعومة بشكل واضح
+3. **مراجعة الربط**: التأكد من أن `exam_timetable` يتكامل مع `exam_periods` و `exam_sessions` و `calendar_master`
+
+> [!NOTE]
+> هذا مشروع DDL (تصميم قاعدة بيانات) — لا يوجد تطبيق قابل للتشغيل حالياً. التحقق يتم بمراجعة الكود والمنطق.
