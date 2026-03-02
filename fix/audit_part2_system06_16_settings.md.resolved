@@ -1,0 +1,161 @@
+# 📋 تقرير التدقيق التكميلي — System 06 + System 16 + system_settings
+## مراجعة التنظيم وموضع الإعدادات
+
+---
+
+## 1. تحليل `system_settings` — هل كل إعداد في مكانه الصحيح؟
+
+### 1.1 الإعدادات الحالية المُدخلة
+
+| الإعداد | القيمة | التصنيف الحالي | **هل المكان صحيح؟** | التوصية |
+|---|---|---|---|---|
+| `founder_name` | خالد شبيطه | identity | ✅ صحيح | بنية مشتركة (عامة) |
+| `founder_year` | ١٤٤٧هـ | identity | ✅ صحيح | بنية مشتركة |
+| `company_name` | شركة إنما سوفت | identity | ✅ صحيح | بنية مشتركة |
+| `republic_logo` | NULL | identity | ✅ صحيح | بنية مشتركة |
+| `curriculum_logo` | NULL | identity | ✅ صحيح | بنية مشتركة |
+| `report_header_line1-4` | بيانات الوزارة | reports | ✅ صحيح | عامة لكل التقارير |
+| `default_date_format` | hijri | general | ✅ صحيح | بنية مشتركة |
+| `session_timeout_hours` | 24 | security | ✅ صحيح | متعلق بالجلسات |
+| `allow_grade_edit` | true | grades | ⚠️ **مشكوك** | الأصح: يتحكم به `exam_periods.is_locked` |
+| `report_footer_text` | نص رسمي | reports | ✅ صحيح | بنية مشتركة |
+
+### 1.2 الإعدادات المذكورة في سؤالك — تحليل الموضع
+
+| الإعداد | المكان المناسب | السبب |
+|---|---|---|
+| `school_name` | ✅ **`system_settings`** | إعداد عام يُستخدم في كل مكان |
+| `report_footer_text` | ✅ **`system_settings`** | إعداد عام للتقارير |
+| `allow_grade_edit` | ⚠️ **مكرر وظيفياً** | الدرجات تُقفل عبر `exam_periods.is_locked` + triggers. هذا الإعداد مفيد كطبقة إضافية على مستوى التطبيق لكنه **ليس بديلاً عن القفل في DB** |
+| `current_academic_year` | ⚠️ **`system_settings`** مقبول — لكن الأفضل عمود `is_current` في `academic_years` | `academic_years` موجود فعلاً وعامود `is_current` أدق من TEXT |
+| `logo_path` | ✅ **`system_settings`** | أو يمكن ربطه بـ `file_attachments` |
+| `theme_color` | ✅ **`system_settings`** | خاص بالواجهة |
+| `weekend_days` | ✅ **`system_settings`** | لكن الأصح FK إلى `lookup_days` أو JSON array |
+| `sms_enabled` | ✅ **`system_settings`** | خاص بالإشعارات |
+| `show_ticker` | ✅ **`system_settings`** | خاص بالواجهة |
+
+> [!IMPORTANT]
+> ### `max_students_per_class` — هل مكانه هنا؟
+> **الإجابة: لا — مكانه الأصح ليس `system_settings`**
+>
+> هذا الإعداد **أكاديمي تنظيمي** يجب أن يكون في **`grading_outcome_rules`** أو جدول جديد **`classroom_capacity_rules`** مرتبط بالعام الدراسي والمرحلة:
+> - إذا كان العدد ثابت لكل المراحل → `system_settings` مقبول
+> - إذا كان العدد يختلف حسب المرحلة (ابتدائي 45، ثانوي 30) → **يجب جدول مستقل**
+> - إذا أردت إنذار عند تجاوز العدد → **يجب أن يكون في System 04 (الطلاب)** مع Trigger على `student_enrollments`
+
+---
+
+## 2. مراجعة System 06 — الإدارة والعمليات 🔴
+
+### 2.1 المشكلة الرئيسية: **خلط أنظمة مختلفة في نظام واحد**
+
+> [!CAUTION]
+> System 06 يحتوي على **9 أقسام مختلفة** في ملف واحد. هذا يخالف فلسفة الفصل المعتمدة في باقي الأنظمة.
+
+| القسم في System 06 | **هل ينتمي هنا؟** | الموقع الأنسب |
+|---|---|---|
+| 1. الاجتماعات والقرارات | ✅ **نعم** | إدارة (صحيح) |
+| 2. المسابقات والأنشطة | ❌ **لا** | **System 09 (الأنشطة)** — يوجد نظام مخصص! |
+| 3. الصيانة والعمليات | ✅ **نعم** | إدارة عمليات (صحيح) |
+| 4. الزوار والعلاقات العامة | ✅ **نعم** | أو نظام مستقل (إذا كبر) |
+| 5. المشكلات والحوادث (`gov_incidents`) | ⚠️ **جزئياً** | مشكلات الطلاب → System 04 (يوجد `student_problems`!). الموظفين → System 03. العامة → System 06 |
+| 5b. مجلس الآباء | ❌ **لا** | **System 04 (الطلاب/أولياء الأمور)** — مرتبط بـ `guardians` |
+| 6. الخطط والمتابعة | ✅ **نعم** | إدارة (صحيح) |
+| 7. السلامة/الإسعافات | ❌ **لا** | **System 19 (الصحة المدرسية)** — يوجد نظام مخصص! |
+| 8. فحص البنية التحتية | ✅ **نعم** | مرتبط بالصيانة (صحيح) |
+| 9. الإذاعة الصباحية | ❌ **لا** | **System 09 (الأنشطة)** — نشاط مدرسي |
+
+### 2.2 تكرارات خطيرة مع أنظمة أخرى
+
+| في System 06 | مكرر مع | المشكلة |
+|---|---|---|
+| `gov_incidents` (مشكلات الطلاب) | `student_problems` (System 04) | **جدولان لنفس الغرض!** أيهما يُستخدم؟ |
+| `first_aid_incidents` | System 19 (الصحة المدرسية) | الإسعافات يجب أن تكون في الصحة المدرسية |
+| `competitions` + `competition_participants` | System 09 (الأنشطة اللاصفية) | المسابقات أنشطة لاصفية بطبيعتها |
+
+### 2.3 مشاكل تقنية في System 06
+
+| # | المشكلة | التفصيل |
+|---|---|---|
+| 1 | **Lookup tables مفقودة** | `lookup_meeting_types`, `lookup_meeting_statuses`, `lookup_maintenance_statuses`, `lookup_facility_types`, `lookup_visitor_sources`, `lookup_competition_categories`, `lookup_incident_target_types` — كلها مُستخدمة كـ FK لكن **غير معرّفة في الملف!** |
+| 2 | **ترقيم الأقسام خاطئ** | القسم 5 مكرر مرتين (مرة للمشكلات ومرة لمجلس الآباء) |
+| 3 | **FK لـ `week_id` معطّل** | `-- FOREIGN KEY (week_id) REFERENCES lookup_week_numbers(id), -- Add if needed` — معلّق في `visitor_logs` |
+| 4 | **ENUM بدل FK** | `priority` و `execution_status` و `severity` و `position` و `participant_type` كلها ENUM — المفروض FK مثل باقي الأنظمة |
+| 5 | **`entity_name` بدل FK حقيقي** | `gov_incidents` يربط بالاسم النصي بدلاً من `student_id`/`employee_id` مباشرة — هش وغير موثوق |
+| 6 | **View تربط بالاسم** | `v_gov_student_incidents` يستخدم `WHERE vm.entity_name = s.full_name` — **خطأ معماري**: ماذا لو تكرر الاسم؟ |
+
+---
+
+## 3. مراجعة System 16 — التقارير والكشوفات 📄
+
+### 3.1 التقييم العام: **ممتاز مع ملاحظات**
+
+| الجانب | التقييم |
+|---|---|
+| فكرة المحرك الديناميكي | ⭐⭐⭐⭐⭐ ممتازة |
+| الفلترة الذكية | ⭐⭐⭐⭐ جيد جداً |
+| تخصيصات المستخدم | ⭐⭐⭐⭐⭐ فكرة رائعة |
+| سجل التدقيق | ⭐⭐⭐⭐ جيد جداً |
+| Views المُعدة مسبقاً | ⭐⭐⭐ تحتاج توسيع |
+
+### 3.2 هل الطريقة صحيحة لنظام التقارير؟
+
+> [!TIP]
+> **نعم — هذه الطريقة هي الصحيحة.** بدلاً من برمجة كل تقرير يدوياً، يتم:
+> 1. إنشاء VIEW في قاعدة البيانات يجمع البيانات
+> 2. تسجيل VIEW كـ template في `report_templates`
+> 3. تعريف الأعمدة والفلاتر ديناميكياً
+> 4. المستخدم يخصص ويحفظ نسخته
+
+### 3.3 ملاحظات على System 16
+
+| # | الملاحظة | الخطورة |
+|---|---|---|
+| 1 | **خطأ بناء (Syntax Error)** في `report_filter_definitions`: `filter_type EN_UI_TYPE ENUM(...)` — كلمة `EN_UI_TYPE` زائدة وستسبب خطأ MySQL | 🔴 حرج |
+| 2 | **View `v_report_grades_detailed`** يشير لعمود `es.max_score` (سطر 172) لكنه يستخدم alias `et` — خطأ مرجعي | 🔴 حرج |
+| 3 | **View `v_report_student_master`** يشير لـ `parents` و `s.parent_id` — هذا الجدول اسمه `guardians` و لا يوجد `parent_id` في `students` | 🔴 حرج |
+| 4 | الـ Views تغطي 3 تقارير فقط بينما README يذكر +45 تقرير — الـ Views الباقية غير موجودة بعد | 🟡 متوسط |
+| 5 | لا يوجد Trigger/Procedure لتوليد التقارير — المنطق سيكون في Backend فقط | 🟢 مقبول |
+
+---
+
+## 4. ملخص التوصيات
+
+### إعادة تنظيم System 06 — مطلوب فوراً 🔴
+
+```mermaid
+graph TD
+    S06[System 06 الحالي] --> A[✅ يبقى في System 06]
+    S06 --> B[❌ يُنقل لنظام آخر]
+
+    A --> A1[الاجتماعات والقرارات]
+    A --> A2[الصيانة والعمليات]
+    A --> A3[الزوار]
+    A --> A4[الخطط والمتابعة]
+    A --> A5[فحص البنية التحتية]
+    A --> A6[النظافة]
+
+    B --> B1[المسابقات → System 09]
+    B --> B2[الإذاعة → System 09]
+    B --> B3[الإسعافات → System 19]
+    B --> B4[مجلس الآباء → System 04]
+    B --> B5["gov_incidents → يُدمج مع student_problems أو يُفصل"]
+```
+
+### إعدادات `system_settings` — تصنيف مقترح
+
+| التصنيف | مكانه الصحيح | الإعدادات المنتمية |
+|---|---|---|
+| **هوية النظام** | `system_settings` ✅ | اسم المدرسة، الشعار، اسم الشركة، الألوان |
+| **رؤوس التقارير** | `system_settings` ✅ | header lines, footer text |
+| **أمان الجلسات** | `system_settings` ✅ | session timeout |
+| **حدود أكاديمية** | ❌ **ليس هنا** — `classroom_rules` أو `grading_outcome_rules` | max_students_per_class, max_absences |
+| **تقويم/عطل** | ❌ **ليس هنا** — `calendar_settings` موجود فعلاً | weekend_days |
+| **قفل الدرجات** | ⚠️ **مكرر** — يتحكم به `exam_periods.is_locked` | allow_grade_edit |
+
+> [!WARNING]
+> **القاعدة الذهبية:** إذا كان الإعداد يتغير **حسب العام/الصف/المرحلة** فمكانه **جدول مرتبط بالنواة الأكاديمية**، وليس `system_settings`. جدول `system_settings` فقط للإعدادات **الثابتة عالمياً** لكل المدرسة.
+
+---
+
+> تقرير تكميلي أعدّه: **Antigravity AI — Senior ERP Systems Auditor**

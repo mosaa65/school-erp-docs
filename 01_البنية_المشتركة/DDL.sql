@@ -239,6 +239,7 @@ INSERT INTO lookup_relationship_types (name_ar, gender) VALUES
 ('أب', 'ذكر'),
 ('أم', 'أنثى'),
 ('أخ', 'ذكر'),
+
 ('أخت', 'أنثى'),
 ('عم', 'ذكر'),
 ('عمة', 'أنثى'),
