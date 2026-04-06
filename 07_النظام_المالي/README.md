@@ -4,15 +4,22 @@
 
 ---
 
+> [!NOTE]
+> **ملاحظة تحديث 2026-03-30:** للتنفيذ الحالي والفجوات المفتوحة راجع:
+> - `finance_gap_matrix.md`
+> - `finance_p0_backlog.md`
+> - التنفيذ داخل الريبو أصبح مغلقًا عمليًا، والمتبقي الإجرائي هو تفعيل `required checks` على GitHub حسب الـ runbook.
+
+---
 ## 📌 بطاقة النظام
 
 | البند                   | القيمة                                                  |
 | ----------------------- | ------------------------------------------------------- |
 | **المهندسون المسؤولون** | عماد الجماعي & فيصل الجماعي (المحاسبة والمالية)         |
 | **التنسيق والمعمارية**  | عماد الجماعي (Enterprise Architect)                     |
-| **عدد الجداول**         | 35 جدول (7 Legacy + 28 Advanced) + 9 Views + 2 Triggers |
+| **عدد الجداول**         | 35 جدول (7 Legacy + 28 Advanced) + 8 Views + 2 Triggers |
 | **ملف DDL**             | `DDL.sql` (موحّد — Legacy + Advanced + Bridge)          |
-| **حالة النظام**         | ✅ مكتمل 100% — جاهز للتطوير                            |
+| **حالة النظام**         | ✅ جاهز تشغيلًا داخل الريبو مع خطوة GitHub إدارية أخيرة |
 | **الأساس المحاسبي**     | ✅ القيد المزدوج (Double-Entry Accounting)              |
 | **نسبة التغطية**        | 12 صندوق + 27 تصنيف مالي + 36 حساب + 5 أكواد ضريبية     |
 
@@ -37,7 +44,7 @@
 | الضرائب          | غير مدعومة               | ✅ محرك VAT متقدم (مدخلات/مخرجات)       |
 | إقفال الفترات    | غير موجود                | ✅ شهري/ربعي + Triggers حماية           |
 | سجل التدقيق      | غير موجود                | ✅ Audit Trail شامل                     |
-| الميزانيات       | غير موجودة               | ✅ Budget vs Actual + health indicators |
+| الميزانيات       | غير موجودة               | ✅ Budgets + Budget vs Actual + health indicators |
 | مذكرات ائتمان    | غير موجودة               | ✅ Credit/Debit Notes                   |
 | القيود المتكررة  | غير موجودة               | ✅ جدولة يومية/شهرية/سنوية              |
 | مراكز التكلفة    | غير موجودة               | ✅ Cost Centers هرمية                   |
@@ -115,7 +122,7 @@
 
 ---
 
-## � التقارير (9 Views)
+## 📊 التقارير (8 Views)
 
 | View                                 | الوصف                                             |
 | ------------------------------------ | ------------------------------------------------- |
@@ -138,8 +145,32 @@
 | `README.md`                        | هذا الملف — توثيق شامل                    |
 | `engineering_report_v3.2.md`       | تقرير هندسي مفصل لفريق التطوير            |
 | `advanced_finance_architecture.md` | تحليل الوضع الراهن + تدفق البيانات        |
-| `advanced_finance_integration.md`  | خطة التكامل + 30+ API Endpoint            |
+| `advanced_finance_integration.md`  | خطة التكامل + 30+ API Endpoint + mapping التنفيذ الحالي |
 | `advanced_finance_phases.md`       | خطة تنفيذ مرحلية — 4 Sprints              |
+| `billing_contract_decision.md`     | القرار الرسمي لمسار إنشاء فاتورة الطالب   |
+| `finance_gap_matrix.md`            | Gap Matrix تنفيذية — الفجوات والمهام المتبقية |
+| `finance_p0_backlog.md`            | Backlog تنفيذية لمرحلة P0 — تذاكر، مدد، واعتماديات |
+| `finance_remaining_agents_plan.md` | توزيع الوكلاء على المهام المتبقية مع أوامر تنفيذ واضحة |
+| `finance_hybrid_branch_fix_plan.md` | خطة إصلاح نموذج تعدد الفروع الهجين |
+
+---
+
+## 🧭 المصطلحات الرسمية في التنفيذ الحالي
+
+- **شجرة الحسابات** في التنفيذ الحالي = `chart-of-accounts`
+- **القيود اليومية** في التنفيذ الحالي = `journal-entries`
+- **إنشاء فاتورة طالب مفردة** في التنفيذ الحالي = `POST /finance/student-invoices`
+- **التوليد الجماعي للفواتير** في التنفيذ الحالي = `POST /finance/billing/bulk-generate`
+- **الميزانية مقابل الفعلي** في التنفيذ الحالي = `GET /finance/budgets/:id/budget-vs-actual` مع صفحة واجهة `/app/budgets`
+
+---
+
+## ⚡ تحسينات التشغيل اليومي الحالية
+
+- **Billing Engine defaults**: يوجد الآن `GET /finance/billing/defaults` لتعبئة السنة الحالية، العملة الأساسية، تاريخ الفاتورة، وتاريخ الاستحقاق المقترح تلقائيًا.
+- **One-step payment completion**: يوجد الآن `POST /finance/payment-transactions/:id/complete-and-reconcile` لإتمام عملية الدفع وترحيلها محاسبيًا في خطوة واحدة بدل التنفيذ اليدوي على مرحلتين.
+- **Bank auto-match**: يوجد الآن `POST /finance/bank-reconciliations/:id/auto-match-transactions` لمطابقة العمليات المؤهلة تلقائيًا داخل التسوية البنكية وتقليل الإدخال اليدوي اليومي.
+- **Billing form persistence**: واجهة `billing-engine` تحتفظ بآخر مدخلات التشغيل اليومي محليًا لتقليل إعادة الإدخال بين الزيارات.
 
 ---
 
